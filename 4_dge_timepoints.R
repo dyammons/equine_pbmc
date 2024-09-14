@@ -8,10 +8,14 @@ source("/pl/active/dow_lab/dylan/repos/scrna-seq/analysis-code/customFunctions_S
 # library(ComplexHeatmap)
 outName <- "dge"
 
-### Run 
+### This script is split into x sections. Below are detail of each block.
 ## (1) Run DEseq2 using LRT
 ## (2) Complete hclus to identify DEG trends
-## (3) Attempt reverse CIBERSORT analysis using LRT gene signatures
+## (3) Run GSEA of the LRT clades
+## (4) An aside: compare to ZW analysis
+## (5) Reverse CIBERSORT analysis using LRT gene signatures
+## (6) Attempt to compare to synovial fluid -- minimal overlap
+## (7) Attempt correlation analysis
 
 
 ### (1) Run DEseq2 using LRT
@@ -50,6 +54,7 @@ write.csv(
   sig_res, quote = FALSE, row.names = FALSE,
   file = paste0("../output/", outName, "/all_genes.csv")
 )
+
 
 ### (2) Complete hclus to identify DEG trends
 #Complete hclus
@@ -111,7 +116,62 @@ write.csv(
   file = paste0("../output/", outName, "/deg_clades.csv")
 )
 
-### (3) Attempt reverse CIBERSORT analysis using LRT gene signatures
+
+### (3) Run GSEA of the LRT clades
+avg_exp <- avg_exp[! duplicated(avg_exp$gene), ]
+degs <- split(avg_exp$gene, avg_exp$clade)
+#Use clusterProfiler
+gene_sets <- as.data.frame(
+  msigdbr(species = "horse", category = "C5", subcategory = NULL)
+) %>% 
+  distinct(gs_name, gene_symbol)
+res <- lapply(degs, enricher, TERM2GENE = gene_sets)
+res <- lapply(res, as.data.frame)
+res <- bind_rows(res, .id = 'clade')
+res$ID <- gsub("REACTOME_", "", res$ID)
+
+ht <- Heatmap(
+  name = "Scaled\nexpression",
+  mat_scaled, 
+  cluster_columns = F, 
+  show_row_names = F,
+#   cluster_rows = hc
+  row_split = factor(
+    cutree(hc, k = 6),
+    levels = c(4, 2, 1, 6, 5, 3)
+  ),
+  column_split = factor(
+    gsub("PC.._", "", colnames(mat)),
+    levels = unique(gsub("PC.._", "", colnames(mat)))
+  ),
+  right_annotation = rowAnnotation(
+    textbox = anno_textbox(
+      factor(cutree(hc, k = 6), levels = c(4, 2, 1, 6, 5, 3)), 
+      split(res$ID, res$clade),
+      by = "anno_block",
+      gp = gpar(fontsize = 10, col = "black"),
+      background_gp = gpar(fill = NA, col = NA),
+      max_width = unit(2.25, "in")
+    )
+  )
+)
+png(file = paste0("../output/", outName, "/DE_heat.png"), width = 4500, height = 4000, res = 400)
+par(mfcol = c(1, 1))
+draw(ht)
+dev.off()
+
+
+### (4) An aside: compare to ZW analysis
+#Load in the DE analysis for d14 vs d0 that I had access to
+deg.df <- read.csv("../output/zw_analysis/d14_v_d0.csv", row.names = 1)
+deg.df <- deg.df[deg.df$padj < 0.05 & abs(deg.df$log2FoldChange) > 2, ]
+deg.df$direction <- ifelse(deg.df$log2FoldChange > 2, "UP", "DOWN")
+degs <- split(rownames(deg.df), deg.df$direction)
+res <- lapply(degs, enricher, TERM2GENE = gene_sets)
+res <- lapply(res, as.data.frame)
+
+
+### (5) Attempt reverse CIBERSORT analysis using LRT gene signatures
 ## Load the PBMC scrna reference dataset as done in `1_prep_cibersort.R
 seu.obj <- readRDS(
     "../../external_data/2023_09_11_pbmc_data_res0.4_dims50_dist0.5_neigh50_S3.rds"
@@ -172,13 +232,12 @@ ecScores <- majorDot(
 ggsave(paste0("../output/", outName, "/", outName, "_dots_celltypes.png"), width = 5, height = 4)
 
 
-
-### (3) Compare to synovial fluid -- minimal overlap
+### (6) Compare to synovial fluid -- minimal overlap
 res_sf <- read.csv("../../sf/output/allCells_clean/lrt/All cells/allCells_clean_cluster_All cells_all_genes.csv")
 mat <- mat[intersect(res_sf$gene, sig_res$gene), ]
 
 
-### (4) Attempt correlation analysis
+### (7) Attempt correlation analysis
 lapply(rownames(mat), FUN = function(x){
   browser()
   dat <- data.frame(value = mat[x, ]) %>%
