@@ -1,15 +1,17 @@
 #!/usr/bin/Rscript
 
 ## Load libraries
-library(tidyverse)
-library(DESeq2)
-library(ComplexHeatmap)
+source("/pl/active/dow_lab/dylan/repos/scrna-seq/analysis-code/customFunctions_Seuratv5.R")
+# library(Seurat)
+# library(tidyverse)
+# library(DESeq2)
+# library(ComplexHeatmap)
 outName <- "dge"
 
 ### Run 
 ## (1) Run DEseq2 using LRT
 ## (2) Complete hclus to identify DEG trends
-## (3) Attempt correlation analysis
+## (3) Attempt reverse CIBERSORT analysis using LRT gene signatures
 
 
 ### (1) Run DEseq2 using LRT
@@ -50,17 +52,26 @@ write.csv(
 )
 
 ### (2) Complete hclus to identify DEG trends
+#Complete hclus
 mat <- counts(dds, normalized = TRUE)[sig_res$gene, ]
 mat_scaled <- t(scale(t(mat)))
 M <- (1 - cor(t(mat_scaled), method = "pearson")) / 2
 hc <- hclust(as.dist(M), method = "complete")
+#Generate heatmap
 ht <- Heatmap(
   name = "Scaled\nexpression",
   mat_scaled, 
   cluster_columns = F, 
   show_row_names = F,
-  cluster_rows = F,
-  row_split = cutree(hc, k = 6)
+#   cluster_rows = hc
+  row_split = factor(
+    cutree(hc, k = 6),
+    levels = c(4, 2, 1, 6, 5, 3)
+  ),
+  column_split = factor(
+    gsub("PC.._", "", colnames(mat)),
+    levels = unique(gsub("PC.._", "", colnames(mat)))
+  )
 )
 png(file = paste0("../output/", outName, "/DE_heat.png"), width = 4000, height = 4000, res = 400)
 par(mfcol = c(1, 1))
@@ -99,6 +110,68 @@ write.csv(
   avg_exp, quote = FALSE, row.names = FALSE,
   file = paste0("../output/", outName, "/deg_clades.csv")
 )
+
+### (3) Attempt reverse CIBERSORT analysis using LRT gene signatures
+## Load the PBMC scrna reference dataset as done in `1_prep_cibersort.R
+seu.obj <- readRDS(
+    "../../external_data/2023_09_11_pbmc_data_res0.4_dims50_dist0.5_neigh50_S3.rds"
+)
+#Remove unassigned cells and poorly defined cell types
+seu.obj <- subset(
+    seu.obj, invert = T, cells = colnames(seu.obj)[is.na(seu.obj$celltype.l2)]
+)
+seu.obj <- subset(
+    seu.obj, invert = T, 
+    subset = celltype.l2 %in% c(
+        "T CD4- CD8- CD200+",  "B excluded",
+        "B proliferating", "T proliferating"
+    )
+)
+#Reduce the number of cell types to improve deconvolution performance
+newNames <- structure(
+    c(
+        "B cell", "CD4 T cell", "CD4 T cell", "CD8 T cell", "CD8 T cell", 
+        "CD4 T cell", "CD8 T cell", "B cell", "Monocyte", "B cell",
+        "CD8 T cell", "Dendritic cell", "T gd", "Basophil", "Dendritic cell",
+        "Dendritic cell", "B cell", "Monocyte", "Neutrophil"
+     ), 
+    names = 
+    c(
+        "B T-bet+", "T CD4+ non-naïve", "T CD4+ naïve", "PRF1+ non-annotated",
+        "T CD8+ memory", "T CD4+ cytotoxic", "T CD8+ naïve", "B naïve", 
+        "classical mono", "B memory", "NK", "cDC2", "T gd", "Basophil", "cDC1",  
+        "plasmacytoid DC", "B antibody secreting", "non-classical mono", 
+        "Neutrophil"
+    )
+)
+seu.obj <- RenameIdents(seu.obj, newNames)
+seu.obj$celltype_cibersort <- Idents(seu.obj)
+#Load data and remove duplicate genes
+df_clades <- read.csv("../output/dge/deg_clades.csv")
+df_clades <- df_clades[! duplicated(df_clades$gene), ]
+modulez <- split(df_clades$gene, df_clades$clade)
+#Complete module scoring
+seu.obj <- AddModuleScore(seu.obj, features = modulez, name = "_score")
+names(seu.obj@meta.data)[grep("_score", names(seu.obj@meta.data))] <- names(modulez)
+#Plot the results
+features <- names(modulez)
+ecScores <- majorDot(
+  seu.obj = seu.obj, groupBy = "celltype_cibersort", 
+  scale = T, features = features
+) + 
+  theme(
+    axis.title.y = element_blank(),
+    legend.direction = "vertical",
+    legend.position = "right"
+  ) + 
+  labs(x = "Clade") + 
+  guides(
+    color = guide_colorbar(title = 'Scaled\nenrichment\nscore'),
+    size = guide_legend(nrow = 3, byrow = F, title = 'Percent\nenriched')
+  )
+ggsave(paste0("../output/", outName, "/", outName, "_dots_celltypes.png"), width = 5, height = 4)
+
+
 
 ### (3) Compare to synovial fluid -- minimal overlap
 res_sf <- read.csv("../../sf/output/allCells_clean/lrt/All cells/allCells_clean_cluster_All cells_all_genes.csv")
