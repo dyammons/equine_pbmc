@@ -9,6 +9,11 @@ source("/pl/active/dow_lab/dylan/repos/scrna-seq/analysis-code/customFunctions_S
 outName <- "dge"
 
 ### This script is split into x sections. Below are detail of each block.
+###
+### Purpose: complete time series DE analysis and understand how GEX is altered
+### over the time course.
+###
+### Sections:
 ## (1) Run DEseq2 using LRT
 ## (2) Complete hclus to identify DEG trends
 ## (3) Run GSEA of the LRT clades
@@ -122,7 +127,7 @@ avg_exp <- avg_exp[! duplicated(avg_exp$gene), ]
 degs <- split(avg_exp$gene, avg_exp$clade)
 #Use clusterProfiler
 gene_sets <- as.data.frame(
-  msigdbr(species = "horse", category = "C5", subcategory = NULL)
+  msigdbr(species = "horse", category = "C2", subcategory = "REACTOME")
 ) %>% 
   distinct(gs_name, gene_symbol)
 res <- lapply(degs, enricher, TERM2GENE = gene_sets)
@@ -169,7 +174,60 @@ deg.df$direction <- ifelse(deg.df$log2FoldChange > 2, "UP", "DOWN")
 degs <- split(rownames(deg.df), deg.df$direction)
 res <- lapply(degs, enricher, TERM2GENE = gene_sets)
 res <- lapply(res, as.data.frame)
+# >>> misc reactome pathways enriched, associated with FGF2/FGFR4
+#Do the same for Load in the DE analysis for d1426 vs d0
+deg.df <- read.csv("../output/zw_analysis/d126_v_d0.csv", row.names = 1)
+deg.df <- deg.df[deg.df$padj < 0.05 & abs(deg.df$log2FoldChange) > 2, ]
+deg.df$direction <- ifelse(deg.df$log2FoldChange > 2, "UP", "DOWN")
+degs <- split(rownames(deg.df), deg.df$direction)
+res <- lapply(degs, enricher, TERM2GENE = gene_sets)
+res <- lapply(res, as.data.frame)
+# >>> No pathways enriched
+#Compare clade 5 and 3 (genes enriched at d126) with zw contrast
+clade_degs <- read.csv(paste0("../output/", outName, "/deg_clades.csv"))
+clade_degs <- unique(clade_degs[clade_degs$clade %in% c(3, 5), ]$gene)
+intersect(rownames(deg.df), clade_degs)
+# >>> [1] "ENSECAG00000027998"
 
+## Since so different, try DESeq2 with contasts
+#Load in the matrix
+mixture <- read.csv("../input_bulk/counts.csv", row.names = 1)
+#Make the sample metadata
+meta <- data.frame(sample = colnames(mixture)) %>%
+  separate(sample, remove = F, sep = "_", into = c("horse", "timepoint"))
+#Create the DEseq2 object
+dds <- DESeqDataSetFromMatrix(
+  mixture, 
+  colData = meta,
+  design = ~ timepoint + horse
+)
+#Complete DE using Wald
+dds <- DESeq(dds, test = "Wald")
+deg.df <- as.data.frame(results(dds, contrast = c("timepoint","Day126","Day0")))
+deg.df <- na.omit(deg.df[deg.df$padj < 0.05 & abs(deg.df$log2FoldChange) > 0.58, ])
+deg.df$direction <- ifelse(deg.df$log2FoldChange > 2, "UP", "DOWN")
+degs <- split(rownames(deg.df), deg.df$direction)
+res <- lapply(degs, enricher, TERM2GENE = gene_sets)
+res <- lapply(res, as.data.frame)
+
+mat <- counts(dds, normalized = TRUE)[rownames(deg.df), ]
+mat_scaled <- t(scale(t(mat)))
+M <- (1 - cor(t(mat_scaled), method = "pearson")) / 2
+hc <- hclust(as.dist(M), method = "complete")
+#Generate heatmap
+ht <- Heatmap(
+  name = "Scaled\nexpression",
+  mat_scaled, 
+  cluster_columns = F, 
+  show_row_names = T,
+  cluster_rows = T
+)
+png(file = paste0("../output/", outName, "/DE_heat_zw.png"), width = 4000, height = 4000, res = 400)
+par(mfcol = c(1, 1))
+draw(ht)
+dev.off()
+#Compare with LRT clade 5/3, similar results
+rownames(deg.df)[rownames(deg.df) %in% clade_degs]
 
 ### (5) Attempt reverse CIBERSORT analysis using LRT gene signatures
 ## Load the PBMC scrna reference dataset as done in `1_prep_cibersort.R
