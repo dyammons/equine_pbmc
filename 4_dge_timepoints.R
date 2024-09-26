@@ -2,10 +2,11 @@
 
 ## Load libraries
 source("/pl/active/dow_lab/dylan/repos/scrna-seq/analysis-code/customFunctions_Seuratv5.R")
-# library(Seurat)
-# library(tidyverse)
-# library(DESeq2)
-# library(ComplexHeatmap)
+library(Seurat)
+library(clusterProfiler)
+library(tidyverse)
+library(DESeq2)
+library(ComplexHeatmap)
 outName <- "dge"
 
 ### This script is split into x sections. Below are detail of each block.
@@ -17,7 +18,7 @@ outName <- "dge"
 ## (1) Run DEseq2 using LRT
 ## (2) Complete hclus to identify DEG trends
 ## (3) Run GSEA of the LRT clades
-## (4) An aside: compare to ZW analysis
+## (4) Compare to ZW analysis
 ## (5) Reverse CIBERSORT analysis using LRT gene signatures
 ## (6) Attempt to compare to synovial fluid -- minimal overlap
 ## (7) Attempt correlation analysis
@@ -48,7 +49,7 @@ rld_cor <- cor(rld_mat)
 p <- pheatmap::pheatmap(rld_cor)
 ggsave(p, file = paste0("../output/", outName, "/pheatmap.png"))
 #Complete DE using LRT
-dds <- DESeq(dds, test = "LRT", reduced = ~horse)
+dds <- DESeq(dds, test = "LRT", reduced = ~ horse)
 res <- results(dds)
 #Extract the results and save as a .csv
 sig_res <- data.frame(res) %>%
@@ -73,7 +74,6 @@ ht <- Heatmap(
   mat_scaled, 
   cluster_columns = F, 
   show_row_names = F,
-#   cluster_rows = hc
   row_split = factor(
     cutree(hc, k = 6),
     levels = c(4, 2, 1, 6, 5, 3)
@@ -166,54 +166,49 @@ draw(ht)
 dev.off()
 
 
-### (4) An aside: compare to ZW analysis
-#Load in the DE analysis for d14 vs d0 that I had access to
-deg.df <- read.csv("../output/zw_analysis/d14_v_d0.csv", row.names = 1)
-deg.df <- deg.df[deg.df$padj < 0.05 & abs(deg.df$log2FoldChange) > 2, ]
-deg.df$direction <- ifelse(deg.df$log2FoldChange > 2, "UP", "DOWN")
-degs <- split(rownames(deg.df), deg.df$direction)
-res <- lapply(degs, enricher, TERM2GENE = gene_sets)
-res <- lapply(res, as.data.frame)
-# >>> misc reactome pathways enriched, associated with FGF2/FGFR4
-#Do the same for Load in the DE analysis for d1426 vs d0
-deg.df <- read.csv("../output/zw_analysis/d126_v_d0.csv", row.names = 1)
-deg.df <- deg.df[deg.df$padj < 0.05 & abs(deg.df$log2FoldChange) > 2, ]
-deg.df$direction <- ifelse(deg.df$log2FoldChange > 2, "UP", "DOWN")
-degs <- split(rownames(deg.df), deg.df$direction)
-res <- lapply(degs, enricher, TERM2GENE = gene_sets)
-res <- lapply(res, as.data.frame)
-# >>> No pathways enriched
-#Compare clade 5 and 3 (genes enriched at d126) with zw contrast
-clade_degs <- read.csv(paste0("../output/", outName, "/deg_clades.csv"))
-clade_degs <- unique(clade_degs[clade_degs$clade %in% c(3, 5), ]$gene)
-intersect(rownames(deg.df), clade_degs)
-# >>> [1] "ENSECAG00000027998"
+### (4) Compare to ZW analysis
+## Generate heatmap of DEGs idetnfied by ZW
+#Load in list of DEGs identified by ZW
+deg.df <- read.csv("../output/zw_analysis/degs.csv", header = F)
+mat <- counts(dds, normalized = TRUE)[rownames(dds) %in% unique(deg.df$V1), ]
+mat_scaled <- t(scale(t(mat)))
+#Generate heatmap
+ht <- Heatmap(
+  name = "Scaled\nexpression",
+  mat_scaled, 
+  cluster_columns = F, 
+  show_row_names = F,
+  cluster_rows = T
+)
+png(file = paste0("../output/", outName, "/DE_heat_zw.png"), width = 4000, height = 4000, res = 400)
+par(mfcol = c(1, 1))
+draw(ht)
+dev.off()
+#Compare DEGs to those identified with LRT
+unique(deg.df$V1)[unique(deg.df$V1) %in% unlist(degs)]
+# >>> 16 features in both approaches; LRT length == 310, length ZW == 514
 
 ## Since so different, try DESeq2 with contasts
-#Load in the matrix
-mixture <- read.csv("../input_bulk/counts.csv", row.names = 1)
-#Make the sample metadata
-meta <- data.frame(sample = colnames(mixture)) %>%
-  separate(sample, remove = F, sep = "_", into = c("horse", "timepoint"))
-#Create the DEseq2 object
+#Create new DEseq2 object
 dds <- DESeqDataSetFromMatrix(
   mixture, 
   colData = meta,
   design = ~ timepoint + horse
 )
+#Filter out low count genes
+dds <- dds[rowSums(counts(dds) >= 10) >= 10, ]
 #Complete DE using Wald
-dds <- DESeq(dds, test = "Wald")
-deg.df <- as.data.frame(results(dds, contrast = c("timepoint","Day126","Day0")))
-deg.df <- na.omit(deg.df[deg.df$padj < 0.05 & abs(deg.df$log2FoldChange) > 0.58, ])
-deg.df$direction <- ifelse(deg.df$log2FoldChange > 2, "UP", "DOWN")
+dds <- DESeq(dds)
+res <- results(dds, contrast = c("timepoint", "Day126", "Day0"))
+summary(res)
+deg.df <- as.data.frame(res)
+#Extract significant degs and run GSEA
+deg.df <- na.omit(deg.df[deg.df$padj < 0.05 & abs(deg.df$log2FoldChange) > 2, ])
+deg.df$direction <- ifelse(deg.df$log2FoldChange > 0.58, "UP", "DOWN")
 degs <- split(rownames(deg.df), deg.df$direction)
-res <- lapply(degs, enricher, TERM2GENE = gene_sets)
-res <- lapply(res, as.data.frame)
-
+#Plot heatmap of DEGs
 mat <- counts(dds, normalized = TRUE)[rownames(deg.df), ]
 mat_scaled <- t(scale(t(mat)))
-M <- (1 - cor(t(mat_scaled), method = "pearson")) / 2
-hc <- hclust(as.dist(M), method = "complete")
 #Generate heatmap
 ht <- Heatmap(
   name = "Scaled\nexpression",
@@ -222,12 +217,74 @@ ht <- Heatmap(
   show_row_names = T,
   cluster_rows = T
 )
-png(file = paste0("../output/", outName, "/DE_heat_zw.png"), width = 4000, height = 4000, res = 400)
+png(file = paste0("../output/", outName, "/DE_heat_filtered.png"), width = 4000, height = 4000, res = 400)
 par(mfcol = c(1, 1))
 draw(ht)
 dev.off()
-#Compare with LRT clade 5/3, similar results
-rownames(deg.df)[rownames(deg.df) %in% clade_degs]
+
+## Lower stringency of filtering parameters & remake heatmap
+deg.df <- as.data.frame(res)
+#Extract significant degs and run GSEA
+deg.df <- na.omit(deg.df[deg.df$padj < 0.05 & abs(deg.df$log2FoldChange) > 0.58, ])
+deg.df$direction <- ifelse(deg.df$log2FoldChange > 0.58, "UP", "DOWN")
+degs <- split(rownames(deg.df), deg.df$direction)
+#Plot heatmap of DEGs
+mat <- counts(dds, normalized = TRUE)[rownames(deg.df), ]
+mat_scaled <- t(scale(t(mat)))
+#Generate heatmap
+ht <- Heatmap(
+  name = "Scaled\nexpression",
+  mat_scaled, 
+  cluster_columns = F, 
+  show_row_names = T,
+  cluster_rows = T
+)
+png(file = paste0("../output/", outName, "/DE_heat_filtered_loose.png"), width = 4000, height = 4000, res = 400)
+par(mfcol = c(1, 1))
+draw(ht)
+dev.off()
+#Compare DEGs to those identified by ZW
+deg.df <- read.csv("../output/zw_analysis/degs.csv", header = F)
+unique(deg.df$V1)[unique(deg.df$V1) %in% unlist(degs)]
+# >>> 23 features in both approaches; LRT length == 419, length ZW == 514
+
+## Still not matching ZW results, skip low count filter & rerun deseq
+#Create new DEseq2 object
+dds <- DESeqDataSetFromMatrix(
+  mixture, 
+  colData = meta,
+  design = ~ timepoint + horse
+)
+#Complete DE using Wald
+dds <- DESeq(dds)
+res <- results(dds, contrast = c("timepoint", "Day126", "Day0"))
+summary(res)
+deg.df <- as.data.frame(res)
+#Extract significant degs and run GSEA
+deg.df <- na.omit(deg.df[deg.df$padj < 0.05 & abs(deg.df$log2FoldChange) > 2, ])
+deg.df$direction <- ifelse(deg.df$log2FoldChange > 0.58, "UP", "DOWN")
+degs <- split(rownames(deg.df), deg.df$direction)
+#Plot heatmap of DEGs
+mat <- counts(dds, normalized = TRUE)[rownames(deg.df), ]
+mat_scaled <- t(scale(t(mat)))
+#Generate heatmap
+ht <- Heatmap(
+  name = "Scaled\nexpression",
+  mat_scaled, 
+  cluster_columns = F, 
+  show_row_names = T,
+  cluster_rows = T
+)
+png(file = paste0("../output/", outName, "/DE_heat_noLowCntFilter.png"), width = 4000, height = 4000, res = 400)
+par(mfcol = c(1, 1))
+draw(ht)
+dev.off()
+#Compare DEGs to those identified by ZW
+deg.df <- read.csv("../output/zw_analysis/degs.csv", header = F)
+unique(deg.df$V1)[unique(deg.df$V1) %in% unlist(degs)]
+# >>> 289 features in both approaches; LRT length == 780, length ZW == 514
+
+
 
 ### (5) Attempt reverse CIBERSORT analysis using LRT gene signatures
 ## Load the PBMC scrna reference dataset as done in `1_prep_cibersort.R
