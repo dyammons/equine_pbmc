@@ -7,21 +7,8 @@
 #Session info
 sessionInfo()
 
-##Install Packages 
-if (!require("BiocManager", quietly = TRUE))
-  install.packages("BiocManager")
-
-BiocManager::install("DESeq2")
-BiocManager::install("ComplexHeatmap")
-BiocManager::install("clusterProfiler")
-install.packages("tidyverse")
-install.packages("msigdbr")
-install.packages('Seurat')
-install.packages("rmarkdown")
-
 ## Load libraries
 library(devtools)
-install_github("jokergoo/ComplexHeatmap")
 library(Seurat)
 library(clusterProfiler)
 library(tidyverse)
@@ -38,13 +25,18 @@ require(cluster)
 library(rmarkdown)
 
 #load input directory and define output
-genecounts <- read.csv("~/Desktop/GJCF_PTOA_Take2/HTSeq_Gene_counts_copy.csv", row.names = 1)
+genecounts <- read.csv("../input_bulk/counts.csv", row.names = 1)
 head(genecounts)
-ResultFile <- "~/Desktop/GJCF_PTOA_Take2"
+ResultFile <- "../output/"
 
-#import metadata
-metaData <- read.csv("~/Desktop/GJCF_PTOA_Take2/GJCF_Metadata.csv", header = TRUE, sep = ",")
-metaData
+#import metadata 
+# I couldn't read in you files, so I am making it manually
+# the added benefit of making it like this is that you cannot accidently
+# order the metadata rows differently than the columns. DEseq2 does not check
+# that they match so if there is an error in ordering it will results in 
+# incorrect ananlysis.
+metaData <- data.frame(sample = colnames(genecounts)) %>%
+  separate(sample, remove = F, sep = "_", into = c("horse", "timepoint"))
 
 #Create the DEseq2 object; assign horse ID in columns w/ metadata in corresponding rows
 dds <- DESeqDataSetFromMatrix(
@@ -56,8 +48,8 @@ dds <- DESeqDataSetFromMatrix(
 dds
 
 #Filter out genes w/ counts < 10 reads and that are expressed in less than 9 horses, ideally ~50% of sample
-dds <- estimateSizeFactors(dds)
-keep <- rowSums( counts(dds, normalized=TRUE) >= 10 ) >= 9
+dds <- estimateSizeFactors(dds) ### this is not needed the `DESeq` function runs it
+keep <- rowSums( counts(dds, normalized=TRUE) >= 10 ) >= 9 ### I wouldn't reccomend using normalized counts for filtering
 
 #new DESeq2 object based on filtered criteria above 
 dds <- dds[keep,]
@@ -84,50 +76,55 @@ res <- results(dds)
 head(results(dds, tidy=TRUE))
 summary(res)
 
-#reorder results based on padjust
-res <- res[order(res$padj),]
-head(res)
+# CAUTION: The results function is doing something different than you think here.
+# If you call `results` without the "name" or "contrast" argument you will only 
+# get the results from the last contrast listed in the output of `resultsNames`.
+
+resultsNames(dds)
+# > resultsNames(dds)
+# [1] "Intercept"                "timepoint_Day126_vs_Day0"
+# [3] "timepoint_Day14_vs_Day0"  "timepoint_Day28_vs_Day0" 
+# [5] "timepoint_Day56_vs_Day0"  "horse_PC02_vs_PC01"      
+# [7] "horse_PC03_vs_PC01"       "horse_PC04_vs_PC01"     
+
+# In this case that is horse_PC04_vs_PC01 which is definely not a desirable 
+# contrast to evaluate how GEX is changing over the course of the study. Using 
+# the Wald test (as you did here) you have to extract the results for each 
+# contrast you are interested in. Below is code to extract the DEGs for the 
+# contrasts that look at GEX over time. (there are other ways to get there too)
+
+res.list <- lapply(resultsNames(dds)[2:5], function(name){
+    res <- as.data.frame(results(
+        dds, 
+        name = name,
+        lfcThreshold = 0
+    )) %>%
+        rownames_to_column(var = "gene") %>%
+        mutate(contrast = name)
+})
+res <- do.call(rbind, res.list) %>%
+    filter(padj < 0.05)
+
+
+
+#reorder results based on padjust -- the code defining `sig_res` orders by padj
+
+# The above approach works, but the rowname indexes get mixed up
+# Below is a dplyr alternative
 
 #Extract the results and save as a .csv
-sig_res <- data.frame(res) %>%
-  rownames_to_column(var = "gene") %>%
-  filter(padj < 0.05) %>% 
-  arrange(padj)
+sig_res <- arrange(res, padj)
 
 write.csv(
   sig_res, quote = FALSE, row.names = FALSE,
   file = paste0( ResultFile, "SDEGs.csv")
 )
 
-#we can use plotCounts fxn to compare the normalized counts
-#between treated and control groups for our top 6 genes
-par(mfrow=c(2,3))
-
-plotCounts(dds, gene="MHCB3", intgroup="timepoint")
-plotCounts(dds, gene="ENSECAG00000003925", intgroup="timepoint")
-plotCounts(dds, gene="ASS1 ", intgroup="timepoint")
-plotCounts(dds, gene="ENSECAG00000033152", intgroup="timepoint")
-plotCounts(dds, gene="P3H3", intgroup="timepoint")
-plotCounts(dds, gene="TUBGCP5", intgroup="timepoint")
-
-#Volcano Plot Generate
-#reset par
-par(mfrow=c(1,1))
-# Make a basic volcano plot
-with(res, plot(log2FoldChange, -log10(pvalue), pch=20, main="Volcano plot", xlim=c(-3,3)))
-
-# Add colored points: blue if padj<0.01, red if log2FC>1 and padj<0.05)
-with(subset(res, padj<.01 ), points(log2FoldChange, -log10(pvalue), pch=20, col="blue"))
-with(subset(res, padj<.01 & abs(log2FoldChange)>2), points(log2FoldChange, -log10(pvalue), pch=20, col="red"))
-
-#PCA Plot #First we need to transform the raw count data
-#vst function will perform variance stabilizing transformation
-
-vsdata <- vst(dds, blind=FALSE)
-plotPCA(vsdata, intgroup="timepoint") 
+# I would reccomend using dplyr for all plotting (except in certain cases such
+# as heatmaps)
 
 #Sig DEG heat map
-mat <- counts(dds, normalized = TRUE)[sig_res$gene, ]
+mat <- counts(dds, normalized = TRUE)[unique(sig_res$gene), ]
 mat_scaled <- t(scale(t(mat)))
 M <- (1 - cor(t(mat_scaled), method = "pearson")) / 2
 hc <- hclust(as.dist(M), method = "complete")
@@ -136,7 +133,6 @@ hc <- hclust(as.dist(M), method = "complete")
 ht <- Heatmap(
   name = "Scaled\nexpression",
   mat_scaled, 
-  col = rev(rainbow(10)),
   cluster_columns = F, 
   show_row_names = F,
   row_split = factor(
@@ -157,7 +153,7 @@ dev.off()
 avg_exp <- as.data.frame(t(mat_scaled)) %>%
   rownames_to_column() %>%
   pivot_longer(cols = colnames(.)[2:ncol(.)], names_to = "gene") %>%
-  separate(rowname, remove = F, sep = "_", into = c("timepoint", "horse")) %>%
+  separate(rowname, remove = F, sep = "_", into = c("horse", "timepoint")) %>%
   group_by(gene, timepoint) %>%
   summarize(
     MEAN = mean(value)
